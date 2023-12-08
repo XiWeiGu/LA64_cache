@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <sys/mman.h>
 
 void kernel_16x6_L1_lasx(double* a, double* b, int64_t Loops); // L1 cache hit
 void kernel_16x6_L2_lasx(double* a, double* b, int64_t Loops); // L2 cache hit
@@ -32,7 +33,12 @@ struct thread_param {
 
 void* a;
 void* b;
+void* a0;
+void* b0;
 pthread_t threads[NUM_THREADS];
+
+#define MMAP_ACCESS (PROT_READ | PROT_WRITE)
+#define MMAP_POLICY (MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB)
 
 // return ns
 static inline uint64_t read_time(void)
@@ -43,13 +49,25 @@ static inline uint64_t read_time(void)
 }
 
 static void alloc_mem_aligned(int64_t size) {
+#ifdef MMAP
+    mmap(a0, size, MMAP_ACCESS, MMAP_POLICY | MAP_FIXED, -1, 0);
+    mmap(b0, size, MMAP_ACCESS, MMAP_POLICY | MAP_FIXED, -1, 0);
+    a = (void*)(((unsigned long long)a0 + ALIGN) & (~(ALIGN - 1)));
+    b = (void*)(((unsigned long long)b0 + ALIGN) & (~(ALIGN - 1)));
+#else
     posix_memalign(&a, ALIGN, size);
     posix_memalign(&b, ALIGN, size);
+#endif
 }
 
-static void free_mem_aligned() {
+static void free_mem_aligned(int64_t size) {
+#ifdef MMAP
+    munmap(a0, size);
+    munmap(b0, size);
+#else
     free(a);
     free(b);
+#endif
 }
 
 /* A + B = 512KB + 192KB */
@@ -138,5 +156,5 @@ void main () {
             return;
         }
     }
-    free_mem_aligned();
+    free_mem_aligned(MEM);
 }
