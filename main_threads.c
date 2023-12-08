@@ -16,7 +16,7 @@ void kernel_16x6_L3_lasx(double* a, double* b, int64_t Loops); // L3 cache hit
 #ifndef NUM_THREADS
 #define NUM_THREADS 16
 #endif
-#define MEM (100 << 20)
+#define MEM (2 << 20)
 #define OFFSET (MEM / NUM_THREADS)
 
 #ifdef LA3C5000
@@ -29,12 +29,8 @@ struct thread_param {
     int   id;
     void* sa;
     void* sb;
+    void* a;
 };
-
-void* a;
-void* b;
-void* a0;
-void* b0;
 pthread_t threads[NUM_THREADS];
 
 #define MMAP_ACCESS (PROT_READ | PROT_WRITE)
@@ -48,26 +44,19 @@ static inline uint64_t read_time(void)
     return a * 10; // 100MHz * 10
 }
 
-static void alloc_mem_aligned(int64_t size) {
-#ifdef MMAP
-    mmap(a0, size, MMAP_ACCESS, MMAP_POLICY | MAP_FIXED, -1, 0);
-    mmap(b0, size, MMAP_ACCESS, MMAP_POLICY | MAP_FIXED, -1, 0);
-    a = (void*)(((unsigned long long)a0 + ALIGN) & (~(ALIGN - 1)));
-    b = (void*)(((unsigned long long)b0 + ALIGN) & (~(ALIGN - 1)));
-#else
-    posix_memalign(&a, ALIGN, size);
-    posix_memalign(&b, ALIGN, size);
-#endif
+static void alloc_mem_aligned(struct thread_param* in) {
+    // Each thread is allocated a 2MB huge page
+    in->a = mmap(0, MEM, MMAP_ACCESS, MMAP_POLICY, -1, 0);
+    if (in->a == MAP_FAILED) {
+	    printf("Mmap werror!");
+	    return;
+    }
+    in->sa = (void*)(((unsigned long long)in->a + ALIGN) & (~(ALIGN - 1)));
+    in->sb = (void*)((unsigned long long)in->sa + (MEM) / 2);
 }
 
-static void free_mem_aligned(int64_t size) {
-#ifdef MMAP
-    munmap(a0, size);
-    munmap(b0, size);
-#else
-    free(a);
-    free(b);
-#endif
+static void free_mem_aligned(struct thread_param* in) {
+    munmap(in->a, MEM);
 }
 
 /* A + B = 512KB + 192KB */
@@ -132,14 +121,12 @@ void* kernel_16x6_L1_call_back (void* in) {
 
 void main () {
     int rc;
-    alloc_mem_aligned(MEM); // Alloc 100MB for a and b
-
     struct thread_param param[NUM_THREADS];
 
     for (int i = 0; i < NUM_THREADS; i++) {
 	 param[i].id = i;
-	 param[i].sa = (void*)((unsigned long long)a + i * OFFSET);
-	 param[i].sb = (void*)((unsigned long long)b + i * OFFSET);
+	 alloc_mem_aligned(&param[i]);
+         //printf("%lx, %lx\n", (unsigned long long)param[i].sa, (unsigned long long)param[i].sb);
 #ifdef L3_HIT
 	 pthread_create(&threads[i], NULL, kernel_16x6_L3_call_back, (void *)(&param[i]));
 #elif defined(L2_HIT)
@@ -156,5 +143,8 @@ void main () {
             return;
         }
     }
-    free_mem_aligned(MEM);
+ 
+    for (int i = 0; i < NUM_THREADS; i++) {
+	 free_mem_aligned(&param[i]);
+    };
 }
