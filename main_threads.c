@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include "pagemap.h"
 
 void kernel_16x6_L1_lasx(double* a, double* b, int64_t Loops); // L1 cache hit
 void kernel_16x6_L2_lasx(double* a, double* b, int64_t Loops); // L2 cache hit
@@ -16,7 +17,7 @@ void kernel_16x6_L3_lasx(double* a, double* b, int64_t Loops); // L3 cache hit
 #ifndef NUM_THREADS
 #define NUM_THREADS 16
 #endif
-#define MEM (2 << 20)
+#define MEM (100 << 20)
 #define OFFSET (MEM / NUM_THREADS)
 
 #ifdef LA3C5000
@@ -34,7 +35,7 @@ struct thread_param {
 pthread_t threads[NUM_THREADS];
 
 #define MMAP_ACCESS (PROT_READ | PROT_WRITE)
-#define MMAP_POLICY (MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB)
+#define MMAP_POLICY (MAP_PRIVATE | MAP_ANONYMOUS)
 
 // return ns
 static inline uint64_t read_time(void)
@@ -53,6 +54,19 @@ static void alloc_mem_aligned(struct thread_param* in) {
     }
     in->sa = (void*)(((unsigned long long)in->a + ALIGN) & (~(ALIGN - 1)));
     in->sb = (void*)((unsigned long long)in->sa + (MEM) / 2);
+    pid_t pid = getpid();
+    // Init
+    *(int*)in->sa = 1;
+    *(int*)in->sb = 1;
+    uintptr_t paddr_sa = 0, paddr_sb = 0;
+    if (lkmc_pagemap_virt_to_phys_user(&paddr_sa, pid, ((uintptr_t)in->sa))) {
+        return -1;
+    }
+    if (lkmc_pagemap_virt_to_phys_user(&paddr_sb, pid, ((uintptr_t)in->sb))) {
+        return -1;
+    }
+    printf("sa virt address: %lx , sa phys address: %lx, sb virt address: %lx , sb phys address: %lx \n",
+	   (uintptr_t)in->sa, paddr_sa, (uintptr_t)in->sb, paddr_sb);
 }
 
 static void free_mem_aligned(struct thread_param* in) {
