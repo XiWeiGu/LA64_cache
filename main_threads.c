@@ -7,10 +7,10 @@
 #include <sys/mman.h>
 #include "pagemap.h"
 
+#if 0
 void kernel_16x6_L1_lasx(double* a, double* b, int64_t Loops); // L1 cache hit
 void kernel_16x6_L2_lasx(double* a, double* b, int64_t Loops); // L2 cache hit
 void kernel_16x6_L3_lasx(double* a, double* b, int64_t Loops); // L3 cache hit
-
 
 #define LOOPS 4194304000
 #define ALIGN 64
@@ -148,6 +148,103 @@ void main () {
 #else
 	 pthread_create(&threads[i], NULL, kernel_16x6_L1_call_back, (void *)(&param[i]));
 #endif
+    }
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        rc = pthread_join(threads[t], NULL);
+        if (rc) {
+            printf("Error in pthread_join(): %d\n", rc);
+            return;
+        }
+    }
+ 
+    for (int i = 0; i < NUM_THREADS; i++) {
+	 free_mem_aligned(&param[i]);
+    };
+}
+#endif
+
+#define BUFFER (32 << 20)
+#define P 112
+#define Q 300
+#define R 306
+#define SIZE 8
+#define GEMM_OFFSET_A 0x20000
+#define GEMM_OFFSET_B 0x00
+#define GEMM_ALIGN 64
+#define SC_SIZE 1000*1000*8
+
+#ifndef NUM_THREADS
+#define NUM_THREADS 16
+#endif
+
+#ifdef LA3C5000
+#define MAX_PEAK 35.2
+#else
+#define MAX_PEAK 40.0
+#endif
+
+#define MMAP_ACCESS (PROT_READ | PROT_WRITE)
+#define MMAP_POLICY (MAP_PRIVATE | MAP_ANONYMOUS)
+
+// return ns
+static inline uint64_t read_time(void)
+{
+    uint64_t a = 0, id = 0;
+    asm volatile ( "rdtime.d  %0, %1" : "=r"(a), "=r"(id) :: "memory" );
+    return a * 10; // 100MHz * 10
+}
+
+/* M, N, K, ALPHA, A, B, C, LDC */
+int dgemm_kernel(int, int, int, double, double *, double *, double *, int);
+struct thread_param {
+    int   id;
+    void* buffer;
+    void* sa;
+    void* sb;
+    void* sc;
+};
+pthread_t threads[NUM_THREADS];
+
+static void alloc_mem_aligned(struct thread_param* in) {
+    in->buffer = mmap(0, BUFFER, MMAP_ACCESS, MMAP_POLICY, -1, 0);
+    in->sa = (void *)((uintptr_t)in->buffer + in->id * GEMM_OFFSET_A);
+    in->sb = (void *)(((uintptr_t)in->sa + ((P * Q * SIZE + GEMM_ALIGN) &
+	     ~GEMM_ALIGN)) + GEMM_OFFSET_B);
+    in->sc = mmap(0, SC_SIZE, MMAP_ACCESS, MMAP_POLICY, -1, 0);
+}
+static void free_mem_aligned(struct thread_param* in) {
+    munmap(in->buffer, BUFFER);
+    munmap(in->sc, SC_SIZE);
+}
+
+void* dgemm_kernel_call_back(void* in) {
+    struct thread_param* param  = (struct thread_param*) in;
+    int64_t start, end;
+    double peak, avg;
+    int64_t loops = 100;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(param->id, &cpuset);
+
+    pthread_setaffinity_np(threads[param->id], sizeof(cpu_set_t), &cpuset);
+    start = read_time();
+    for (int i = 0; i < loops; i ++)
+        dgemm_kernel(P, R, Q, 1.0, param->sa, param->sb, param->sc, 1000);
+    end = read_time();
+    avg = (end - start) / (double)(loops);
+    peak = (P * Q * R * 2) / avg;
+    printf("Thread NUM %d peak performance is %.2f GFlops, peak floating-point performance ratio %.2f %\n", param->id, peak, peak / MAX_PEAK * 100.0);
+}
+
+void main () {
+    int rc;
+    struct thread_param param[NUM_THREADS];
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+	 param[i].id = i;
+	 alloc_mem_aligned(&param[i]);
+	 pthread_create(&threads[i], NULL, dgemm_kernel_call_back, (void *)(&param[i]));
     }
 
     for (int t = 0; t < NUM_THREADS; ++t) {
